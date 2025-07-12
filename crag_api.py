@@ -159,6 +159,8 @@ class TTSService:
         """Synchronous audio generation"""
         import torch
         import soundfile as sf
+        import librosa
+        import numpy as np
 
         # Clean and prepare text
         text = self._clean_text(text)
@@ -180,9 +182,23 @@ class TTSService:
         audio_filename = f"tts_{audio_id}.wav"
         audio_path = AUDIO_DIR / audio_filename
 
-        # Convert to numpy and save
+        # Convert to numpy with high-quality processing
         audio_data = speech.cpu().numpy()
-        sf.write(str(audio_path), audio_data, 16000)
+
+        # High-quality time stretching
+        audio_slowed = librosa.effects.time_stretch(
+            audio_data,
+            rate=0.75,
+            hop_length=256,  # Better quality
+            n_fft=1024  # Higher resolution
+        )
+
+        # Professional audio normalization
+        audio_normalized = librosa.util.normalize(audio_slowed)
+        audio_boosted = audio_normalized * 1.25  # 25% volume boost
+        audio_final = np.clip(audio_boosted, -1.0, 1.0)
+
+        sf.write(str(audio_path), audio_final, 16000)
 
         print(f"✅ TTS audio saved: {audio_filename}")
         return f"/audio/{audio_filename}"
