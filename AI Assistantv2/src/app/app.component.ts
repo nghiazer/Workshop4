@@ -21,6 +21,12 @@ interface AskQuestionResponse {
   answer: string;
 }
 
+interface TTSResponse {
+  answer: string;
+  audio_url?: string;
+  has_audio: boolean;
+}
+
 interface UpdateUrlsRequest {
   urls: string[];
 }
@@ -98,7 +104,7 @@ export class AppComponent implements OnInit {
    */
   loadConversationsList() {
     this.loadingConversations = true;
-    
+
     // Mock conversations for now since CRAG API doesn't have conversation management
     setTimeout(() => {
       this.conversations = [
@@ -160,7 +166,7 @@ export class AppComponent implements OnInit {
   }
 
   /**
-   * Send message to CRAG API
+   * Send message to CRAG API with TTS
    */
   sendPrompt() {
     if (!this.userInput.trim()) {
@@ -181,24 +187,31 @@ export class AppComponent implements OnInit {
     this.loading = true;
     this.error = '';
 
-    // Send to CRAG API
+    // Send to CRAG API with TTS
     const request: AskQuestionRequest = { question: currentPrompt };
+    const endpoint = this.ttsEnabled ? '/ask_with_tts' : '/ask';
 
-    this.http.post<AskQuestionResponse>(`${this.API_BASE_URL}/ask`, request).subscribe({
+    this.http.post<TTSResponse | AskQuestionResponse>(`${this.API_BASE_URL}${endpoint}`, request).subscribe({
       next: (response) => {
         const assistantMessage: Message = {
           role: 'assistant',
           content: response.answer,
-          timestamp: new Date(),
-          audioUrl: this.generateDummyAudioUrl() // Dummy audio URL
+          timestamp: new Date()
         };
+
+        // Handle TTS response
+        if ('has_audio' in response && response.has_audio && response.audio_url) {
+          assistantMessage.audioUrl = `${this.API_BASE_URL}${response.audio_url}`;
+          console.log('🔊 TTS audio available:', assistantMessage.audioUrl);
+        }
+
         this.messages.push(assistantMessage);
         this.loading = false;
         this.scrollToBottom();
 
-        // Auto-play TTS if enabled
-        if (this.ttsEnabled) {
-          this.playTTS(assistantMessage.content, assistantMessage);
+        // Auto-play TTS if enabled and available
+        if (this.ttsEnabled && assistantMessage.audioUrl) {
+          this.playServerTTS(assistantMessage);
         }
 
         // Update conversations list
@@ -223,7 +236,7 @@ export class AppComponent implements OnInit {
    */
   updateUrls() {
     const urls = this.urlsInput.split('\n').filter(url => url.trim()).map(url => url.trim());
-    
+
     if (urls.length === 0) {
       this.error = 'Please enter at least one URL';
       return;
@@ -237,7 +250,7 @@ export class AppComponent implements OnInit {
     this.http.post<UpdateUrlsResponse>(`${this.API_BASE_URL}/update_urls`, request).subscribe({
       next: (response) => {
         this.updatingUrls = false;
-        
+
         // Add system message about URL update
         const systemMessage: Message = {
           role: 'assistant',
@@ -274,7 +287,7 @@ export class AppComponent implements OnInit {
     // Add welcome message
     const welcomeMessage: Message = {
       role: 'assistant',
-      content: `🤖 **Welcome to CRAG (Corrective RAG) Assistant!**\n\nI can help you find information from documents and the web using advanced retrieval techniques.\n\n**How it works:**\n• I first search through the knowledge base\n• If information isn't found, I search the web\n• I provide accurate, source-based answers\n• Responses can be played as audio\n\n**Try asking:**\n• "What are AI agents?"\n• "Explain prompt engineering techniques"\n• "How do adversarial attacks work on LLMs?"\n\nFeel free to ask any question!`,
+      content: `🤖 **Welcome to CRAG (Corrective RAG) Assistant!**\n\nI can help you find information from documents and the web using advanced retrieval techniques.\n\n**How it works:**\n• I first search through the knowledge base\n• If information isn't found, I search the web\n• I provide accurate, source-based answers\n• Responses can be played as audio using SpeechT5 TTS\n\n**Try asking:**\n• "What are AI agents?"\n• "Explain prompt engineering techniques"\n• "How do adversarial attacks work on LLMs?"\n\nFeel free to ask any question!`,
       timestamp: new Date()
     };
     this.messages.push(welcomeMessage);
@@ -315,12 +328,67 @@ export class AppComponent implements OnInit {
   }
 
   /**
-   * Play text-to-speech for message (dummy implementation)
+   * Play server-generated TTS audio
    */
-  playTTS(text: string, message: Message) {
+  playServerTTS(message: Message) {
+    if (!message.audioUrl) {
+      console.warn('No audio URL available for message');
+      return;
+    }
+
     this.stopCurrentAudio();
 
-    // Dummy implementation using Web Speech API
+    try {
+      this.currentAudio = new Audio(message.audioUrl);
+
+      this.currentAudio.onloadstart = () => {
+        message.isPlaying = true;
+        console.log('🔊 Loading TTS audio...');
+      };
+
+      this.currentAudio.oncanplay = () => {
+        console.log('🎵 TTS audio ready to play');
+      };
+
+      this.currentAudio.onplay = () => {
+        message.isPlaying = true;
+        console.log('▶️ TTS audio started');
+      };
+
+      this.currentAudio.onpause = () => {
+        message.isPlaying = false;
+        console.log('⏸️ TTS audio paused');
+      };
+
+      this.currentAudio.onended = () => {
+        message.isPlaying = false;
+        this.currentAudio = null;
+        console.log('⏹️ TTS audio ended');
+      };
+
+      this.currentAudio.onerror = (error) => {
+        message.isPlaying = false;
+        this.currentAudio = null;
+        console.error('❌ TTS audio error:', error);
+      };
+
+      this.currentAudio.play().catch(error => {
+        console.error('❌ Failed to play TTS audio:', error);
+        message.isPlaying = false;
+      });
+
+    } catch (error) {
+      console.error('❌ Error creating audio element:', error);
+      message.isPlaying = false;
+    }
+  }
+
+  /**
+   * Fallback to Web Speech API for non-TTS responses
+   */
+  playWebSpeechTTS(text: string, message: Message) {
+    this.stopCurrentAudio();
+
     if ('speechSynthesis' in window) {
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = 0.9;
@@ -341,13 +409,8 @@ export class AppComponent implements OnInit {
       };
 
       this.speechSynthesis.speak(utterance);
-      this.currentAudio = utterance as any; // Type casting for consistency
     } else {
-      // Fallback: simulate audio playback
-      message.isPlaying = true;
-      setTimeout(() => {
-        message.isPlaying = false;
-      }, text.length * 50); // Simulate reading time
+      console.warn('Speech synthesis not supported');
     }
   }
 
@@ -355,10 +418,19 @@ export class AppComponent implements OnInit {
    * Stop current audio playback
    */
   stopCurrentAudio() {
+    // Stop HTML Audio element
+    if (this.currentAudio) {
+      this.currentAudio.pause();
+      this.currentAudio.currentTime = 0;
+      this.currentAudio = null;
+    }
+
+    // Stop Web Speech API
     if (this.speechSynthesis.speaking) {
       this.speechSynthesis.cancel();
     }
-    
+
+    // Reset all message playing states
     this.messages.forEach(msg => {
       msg.isPlaying = false;
     });
@@ -371,7 +443,12 @@ export class AppComponent implements OnInit {
     if (message.isPlaying) {
       this.stopCurrentAudio();
     } else {
-      this.playTTS(message.content, message);
+      // Use server TTS if available, fallback to Web Speech API
+      if (message.audioUrl) {
+        this.playServerTTS(message);
+      } else {
+        this.playWebSpeechTTS(message.content, message);
+      }
     }
   }
 

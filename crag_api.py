@@ -1,7 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import List, Dict
+from typing import List, Dict, Optional
 import uvicorn
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import WebBaseLoader
@@ -17,12 +19,22 @@ from langgraph.graph import END, StateGraph, START
 import os
 from uuid import uuid4
 import hashlib
+import asyncio
+import threading
+from pathlib import Path
 from langchain_core.documents import Document
 from pinecone import Pinecone
 from dotenv import load_dotenv
 
 # FastAPI app
-app = FastAPI(title="CRAG API", description="Corrective RAG API with Azure OpenAI")
+app = FastAPI(title="CRAG API", description="Corrective RAG API with Azure OpenAI and TTS")
+
+# Create audio directory for TTS files
+AUDIO_DIR = Path("audio_files")
+AUDIO_DIR.mkdir(exist_ok=True)
+
+# Mount static files for audio serving
+app.mount("/audio", StaticFiles(directory=str(AUDIO_DIR)), name="audio")
 
 # Add CORS middleware to handle cross-origin requests
 app.add_middleware(
@@ -40,6 +52,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # For development only - uncomment to allow all origins (less secure)
 # app.add_middleware(
 #     CORSMiddleware,
@@ -48,6 +61,121 @@ app.add_middleware(
 #     allow_methods=["*"],
 #     allow_headers=["*"],
 # )
+
+# TTS Service Class
+class TTSService:
+    def __init__(self):
+        self.model = None
+        self.processor = None
+        self.vocoder = None
+        self.speaker_embeddings = None
+        self._model_loaded = False
+        self._loading_lock = threading.Lock()
+
+    def _load_model(self):
+        """Lazy load SpeechT5 model"""
+        if self._model_loaded:
+            return
+
+        with self._loading_lock:
+            if self._model_loaded:  # Double-check pattern
+                return
+
+            try:
+                print("🔄 Loading SpeechT5 TTS model...")
+                from transformers import SpeechT5Processor, SpeechT5ForTextToSpeech, SpeechT5HifiGan
+                import torch
+                import numpy as np
+                from datasets import load_dataset
+
+                # Load processor and model
+                self.processor = SpeechT5Processor.from_pretrained("microsoft/speecht5_tts")
+                self.model = SpeechT5ForTextToSpeech.from_pretrained("microsoft/speecht5_tts")
+                self.vocoder = SpeechT5HifiGan.from_pretrained("microsoft/speecht5_hifigan")
+
+                # Load speaker embeddings
+                embeddings_dataset = load_dataset("Matthijs/cmu-arctic-xvectors", split="validation")
+                self.speaker_embeddings = torch.tensor(embeddings_dataset[7306]["xvector"]).unsqueeze(0)
+
+                self._model_loaded = True
+                print("✅ SpeechT5 model loaded successfully")
+
+            except Exception as e:
+                print(f"❌ Error loading SpeechT5 model: {e}")
+                raise
+
+    async def generate_audio(self, text: str) -> str:
+        """Generate audio file from text"""
+        try:
+            # Load model if not loaded
+            if not self._model_loaded:
+                await asyncio.get_event_loop().run_in_executor(None, self._load_model)
+
+            # Generate audio in thread pool to avoid blocking
+            audio_path = await asyncio.get_event_loop().run_in_executor(
+                None, self._generate_audio_sync, text
+            )
+            return audio_path
+
+        except Exception as e:
+            print(f"❌ TTS generation error: {e}")
+            raise HTTPException(status_code=500, detail=f"TTS generation failed: {str(e)}")
+
+    def _generate_audio_sync(self, text: str) -> str:
+        """Synchronous audio generation"""
+        import torch
+        import soundfile as sf
+
+        # Clean and prepare text
+        text = self._clean_text(text)
+        print(f"🔊 Generating TTS for: {text[:50]}...")
+
+        # Tokenize text
+        inputs = self.processor(text=text, return_tensors="pt")
+
+        # Generate speech
+        with torch.no_grad():
+            speech = self.model.generate_speech(
+                inputs["input_ids"],
+                self.speaker_embeddings,
+                vocoder=self.vocoder
+            )
+
+        # Save audio file
+        audio_id = str(uuid4())[:8]
+        audio_filename = f"tts_{audio_id}.wav"
+        audio_path = AUDIO_DIR / audio_filename
+
+        # Convert to numpy and save
+        audio_data = speech.cpu().numpy()
+        sf.write(str(audio_path), audio_data, 16000)
+
+        print(f"✅ TTS audio saved: {audio_filename}")
+        return f"/audio/{audio_filename}"
+
+    def _clean_text(self, text: str) -> str:
+        """Clean text for better TTS"""
+        import re
+
+        # Remove markdown formatting
+        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # Remove bold
+        text = re.sub(r'\*(.*?)\*', r'\1', text)  # Remove italic
+        text = re.sub(r'`(.*?)`', r'\1', text)  # Remove code
+        text = re.sub(r'#{1,6}\s*', '', text)  # Remove headers
+        text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text)  # Remove links
+
+        # Clean special characters
+        text = re.sub(r'[^\w\s\.,!?;:()-]', '', text)
+
+        # Limit length (SpeechT5 has token limits)
+        if len(text) > 500:
+            text = text[:500] + "..."
+
+        return text.strip()
+
+
+# Initialize TTS service
+tts_service = TTSService()
 
 # Load environment variables from .env file
 load_dotenv()
@@ -397,6 +525,12 @@ class Response(BaseModel):
     answer: str
 
 
+class TTSResponse(BaseModel):
+    answer: str
+    audio_url: Optional[str] = None
+    has_audio: bool = False
+
+
 class UpdateUrlsRequest(BaseModel):
     urls: List[str]
 
@@ -408,12 +542,46 @@ class UpdateUrlsResponse(BaseModel):
 
 @app.post("/ask", response_model=Response)
 async def ask_question(question: Question):
-    """Ask a question using CRAG workflow"""
+    """Ask a question using CRAG workflow (text only)"""
     try:
         print(f"🔍 Processing question: {question.question}")
         result = crag_app.invoke({"question": question.question})
         print(f"✅ Generated answer: {result['generation'][:100]}...")
         return Response(answer=result["generation"])
+    except Exception as e:
+        print(f"❌ Error processing question: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ask_with_tts", response_model=TTSResponse)
+async def ask_question_with_tts(question: Question):
+    """Ask a question using CRAG workflow with TTS audio"""
+    try:
+        print(f"🔍 Processing question with TTS: {question.question}")
+
+        # Get text response from CRAG
+        result = crag_app.invoke({"question": question.question})
+        text_answer = result["generation"]
+        print(f"✅ Generated answer: {text_answer[:100]}...")
+
+        # Generate TTS audio
+        try:
+            audio_url = await tts_service.generate_audio(text_answer)
+            print(f"🔊 TTS audio generated: {audio_url}")
+            return TTSResponse(
+                answer=text_answer,
+                audio_url=audio_url,
+                has_audio=True
+            )
+        except Exception as tts_error:
+            print(f"⚠️ TTS generation failed: {tts_error}")
+            # Return text-only response if TTS fails
+            return TTSResponse(
+                answer=text_answer,
+                audio_url=None,
+                has_audio=False
+            )
+
     except Exception as e:
         print(f"❌ Error processing question: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

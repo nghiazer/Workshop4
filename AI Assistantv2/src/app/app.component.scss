@@ -148,7 +148,7 @@
 
   &.active {
     .conversation-header .conversation-id {
-      color: white;
+      color: var(--primary);
     }
 
     .conversation-meta .message-count {
@@ -286,10 +286,12 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 16px;
+  padding: 2px 16px 2px 16px;
   background: linear-gradient(135deg, var(--primary), var(--secondary));
   color: white;
   min-height: 80px;
+  flex-direction: row;
+  justify-content: space-between;
 
   .header-title {
     display: flex;
