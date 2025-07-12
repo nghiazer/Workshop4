@@ -1,0 +1,268 @@
+<div class="app-container">
+    <!-- Sidebar for conversations list -->
+    <div class="sidebar" [class.collapsed]="!sidebarOpen">
+        <!-- Sidebar header -->
+        <div class="sidebar-header">
+            <h3 *ngIf="sidebarOpen">CRAG Sessions</h3>
+            <button
+                    class="toggle-sidebar-btn"
+                    (click)="toggleSidebar()"
+                    [title]="sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'"
+            >
+                <span *ngIf="sidebarOpen">◀</span>
+                <span *ngIf="!sidebarOpen">▶</span>
+            </button>
+        </div>
+
+        <!-- Conversations list -->
+        <div class="conversations-list" *ngIf="sidebarOpen">
+            <!-- Loading indicator -->
+            <div *ngIf="loadingConversations" class="loading-conversations">
+                <span>Loading sessions...</span>
+            </div>
+
+            <!-- Empty state -->
+            <div *ngIf="!loadingConversations && conversations.length === 0" class="empty-conversations">
+                <span>No sessions yet</span>
+                <small>Start asking questions to begin</small>
+            </div>
+
+            <!-- Conversations items -->
+            <div
+                    *ngFor="let conversation of conversations; trackBy: trackByConversation"
+                    class="conversation-item"
+                    [class.active]="conversation.chatId === chatId"
+                    (click)="selectConversation(conversation)"
+            >
+                <div class="conversation-header">
+                    <span class="conversation-id">{{ conversation.chatId }}</span>
+                    <span class="conversation-date">{{ formatDate(conversation.lastModified) }}</span>
+                </div>
+                <div class="conversation-meta">
+                    <span class="message-count">{{ conversation.messageCount }} messages</span>
+                </div>
+            </div>
+
+            <!-- URL Management Section -->
+            <div class="url-management-section">
+                <h4>📚 Knowledge Base</h4>
+                <textarea
+                        [(ngModel)]="urlsInput"
+                        placeholder="Enter URLs (one per line)"
+                        rows="4"
+                        class="urls-input"
+                        [disabled]="updatingUrls"
+                ></textarea>
+                <div class="url-actions">
+                    <button
+                            (click)="updateUrls()"
+                            [disabled]="updatingUrls"
+                            class="update-urls-btn"
+                    >
+                        <span *ngIf="!updatingUrls">🔄 Update</span>
+                        <span *ngIf="updatingUrls">⏳ Updating...</span>
+                    </button>
+                    <button
+                            (click)="resetUrls()"
+                            [disabled]="updatingUrls"
+                            class="reset-urls-btn"
+                    >
+                        ↺ Reset
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Collapsed sidebar content -->
+        <div class="conversations-list-collapsed" *ngIf="!sidebarOpen">
+            <div
+                    *ngFor="let conversation of conversations.slice(0, 10); trackBy: trackByConversation"
+                    class="conversation-item-collapsed"
+                    [class.active]="conversation.chatId === chatId"
+                    (click)="selectConversation(conversation)"
+                    [title]="'CRAG Session: ' + getShortUuid(conversation.chatId)"
+            >
+                <span class="conversation-id-short">🤖</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main chat container -->
+    <div class="chat-container" [class.sidebar-collapsed]="!sidebarOpen">
+        <!-- Header Section -->
+        <div class="chat-header">
+            <div class="header-title">
+                <h2>🤖 CRAG Assistant</h2>
+                <span class="subtitle">Corrective RAG with Text-to-Speech</span>
+            </div>
+            
+            <div class="header-controls">
+                <button
+                        (click)="createNewConversation()"
+                        [disabled]="loading"
+                        class="control-btn new-btn"
+                        title="New Session"
+                >
+                    <span *ngIf="!loading">➕</span>
+                    <span *ngIf="loading">...</span>
+                </button>
+                
+                <button
+                        (click)="toggleTTS()"
+                        class="control-btn tts-btn"
+                        [class.active]="ttsEnabled"
+                        title="Toggle Text-to-Speech"
+                >
+                    <span *ngIf="ttsEnabled">🔊</span>
+                    <span *ngIf="!ttsEnabled">🔇</span>
+                </button>
+                
+                <button
+                        (click)="clearConversation()"
+                        [disabled]="loading"
+                        class="control-btn clear-btn"
+                        title="Clear Chat"
+                >
+                    🗑️
+                </button>
+            </div>
+
+            <!-- Error Display -->
+            <div *ngIf="error" class="error-message">
+                ⚠️ {{ error }}
+            </div>
+        </div>
+
+        <!-- Chat Window -->
+        <div *ngIf="loaded" class="chat-window">
+            <div class="conversation-id">
+                <b>Session:</b> {{ getShortUuid(chatId) }} | 
+                <span class="rag-status">
+                    🔍 RAG Active | 
+                    <span [class.tts-enabled]="ttsEnabled" [class.tts-disabled]="!ttsEnabled">
+                        {{ ttsEnabled ? '🔊 TTS On' : '🔇 TTS Off' }}
+                    </span>
+                </span>
+            </div>
+
+            <div class="chat-messages-container">
+                <div
+                        *ngFor="let msg of messages; trackBy: trackByMessage"
+                        class="chat-message"
+                        [ngClass]="{
+              'user': msg.role === 'user',
+              'assistant': msg.role === 'assistant',
+              'task-message': isTaskMessage(msg.content)
+            }"
+                >
+                    <div class="message-header">
+                        <strong>
+                            <span *ngIf="msg.role === 'user'">👤 You</span>
+                            <span *ngIf="msg.role === 'assistant'">🤖 CRAG Assistant</span>
+                        </strong>
+                        
+                        <!-- Audio controls for assistant messages -->
+                        <div *ngIf="msg.role === 'assistant'" class="audio-controls">
+                            <button
+                                    (click)="toggleAudio(msg)"
+                                    class="audio-btn"
+                                    [class.playing]="msg.isPlaying"
+                                    [disabled]="!ttsEnabled"
+                                    title="Play/Stop Audio"
+                            >
+                                <span *ngIf="!msg.isPlaying">🔊</span>
+                                <span *ngIf="msg.isPlaying">⏸️</span>
+                            </button>
+                            
+                            <span *ngIf="msg.isPlaying" class="audio-indicator">
+                                <span class="playing-animation">🎵</span>
+                                Playing...
+                            </span>
+                        </div>
+                    </div>
+
+                    <!-- Use markdown component for better formatting -->
+                    <markdown [data]="msg.content"></markdown>
+                    
+                    <!-- Timestamp -->
+                    <div class="message-timestamp" *ngIf="msg.timestamp">
+                        {{ msg.timestamp | date:'HH:mm:ss' }}
+                    </div>
+                </div>
+
+                <!-- Loading indicator -->
+                <div *ngIf="loading" class="loading-message">
+                    🔍 CRAG is processing your question
+                    <span class="typing-dots">
+              <span>.</span>
+              <span>.</span>
+              <span>.</span>
+            </span>
+                    <small>Searching documents and web if needed...</small>
+                </div>
+            </div>
+        </div>
+
+        <!-- Welcome Screen -->
+        <div *ngIf="!loaded && !loading" class="welcome-screen">
+            <div class="conversation-id">
+                🤖 CRAG Assistant
+            </div>
+            <div class="welcome-content">
+                <h1>🔍 Corrective RAG Assistant</h1>
+                <p><strong>Advanced AI Assistant with Retrieval-Augmented Generation and Text-to-Speech</strong></p>
+
+                <div class="welcome-features">
+                    <div>📚 Smart document retrieval from knowledge base</div>
+                    <div>🌐 Web search when information is not found locally</div>
+                    <div>🔊 Text-to-speech for all responses</div>
+                    <div>🛡️ Corrective mechanisms to prevent hallucination</div>
+                    <div>⚡ Real-time source grading and query rewriting</div>
+                </div>
+
+                <div class="welcome-workflow">
+                    <h3>🔄 How CRAG Works:</h3>
+                    <div class="workflow-step">1️⃣ <strong>Retrieve:</strong> Search knowledge base for relevant documents</div>
+                    <div class="workflow-step">2️⃣ <strong>Grade:</strong> Assess relevance of retrieved documents</div>
+                    <div class="workflow-step">3️⃣ <strong>Decision:</strong> Use documents or search web if irrelevant</div>
+                    <div class="workflow-step">4️⃣ <strong>Generate:</strong> Provide accurate, source-based answer</div>
+                    <div class="workflow-step">5️⃣ <strong>Speak:</strong> Convert answer to speech (optional)</div>
+                </div>
+
+                <div class="welcome-examples">
+                    <strong>💬 Try asking:</strong>
+                    <div>"What are AI agents and how do they work?"</div>
+                    <div>"Explain different prompt engineering techniques"</div>
+                    <div>"How do adversarial attacks target large language models?"</div>
+                    <div>"What is the difference between fine-tuning and RAG?"</div>
+                </div>
+
+                <button class="start-btn" (click)="createNewConversation()">
+                    🚀 Start New Session
+                </button>
+            </div>
+        </div>
+
+        <!-- Chat Input -->
+        <div *ngIf="loaded" class="chat-input">
+            <input
+                    [(ngModel)]="userInput"
+                    placeholder="Ask me anything about AI, ML, or the documents in the knowledge base... (Press Enter to send)"
+                    (keydown.enter)="sendPrompt()"
+                    [disabled]="loading"
+                    class="question-input"
+            />
+
+            <button
+                    (click)="sendPrompt()"
+                    [disabled]="loading || !userInput.trim()"
+                    class="send-btn"
+            >
+                <span *ngIf="!loading">🔍 Ask CRAG</span>
+                <span *ngIf="loading">⏳ Processing...</span>
+            </button>
+        </div>
+    </div>
+</div>
+
+<router-outlet />

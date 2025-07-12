@@ -1,0 +1,474 @@
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Dict
+import uvicorn
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import WebBaseLoader
+from langchain_pinecone import PineconeVectorStore
+
+from langchain_openai import AzureOpenAIEmbeddings, AzureChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel as LCBaseModel, Field
+from langchain import hub
+from langchain_core.output_parsers import StrOutputParser
+from langchain_community.tools.tavily_search import TavilySearchResults
+from langgraph.graph import END, StateGraph, START
+import os
+from uuid import uuid4
+import hashlib
+from langchain_core.documents import Document
+from pinecone import Pinecone
+from dotenv import load_dotenv
+
+# FastAPI app
+app = FastAPI(title="CRAG API", description="Corrective RAG API with Azure OpenAI")
+
+# Add CORS middleware to handle cross-origin requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:4200",  # Angular dev server
+        "http://127.0.0.1:4200",  # Alternative localhost
+        "http://localhost:3000",  # React dev server (if needed)
+        "http://127.0.0.1:3000",  # Alternative localhost
+        "http://localhost:8080",  # Vue dev server (if needed)
+        "http://127.0.0.1:8080",  # Alternative localhost
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+# For development only - uncomment to allow all origins (less secure)
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],
+#     allow_credentials=False,  # Must be False when allow_origins=["*"]
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Set USER_AGENT to fix the warning
+if not os.getenv("USER_AGENT"):
+    os.environ["USER_AGENT"] = "CRAG-Assistant/1.0 (Educational Purpose)"
+
+# Azure OpenAI Configuration
+AZURE_OPENAI_API_KEY_EMBEDDING = os.getenv("AZURE_OPENAI_API_KEY_EMBEDDING")
+AZURE_OPENAI_API_KEY_LLM = os.getenv("AZURE_OPENAI_API_KEY_LLM")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+AZURE_OPENAI_ENDPOINT_EMBEDDING = os.getenv("AZURE_OPENAI_ENDPOINT_EMBEDDING")
+AZURE_OPENAI_ENDPOINT_LLM = os.getenv("AZURE_OPENAI_ENDPOINT_LLM")
+
+# Model configurations
+AZURE_EMBEDDING_MODEL = os.getenv("AZURE_EMBEDDING_MODEL", "text-embedding-3-small")
+AZURE_GPT4_MODEL = os.getenv("AZURE_GPT4_MODEL", "gpt-4o-mini")
+
+# Validate required environment variables
+required_vars = [
+    "AZURE_OPENAI_API_KEY_EMBEDDING",
+    "AZURE_OPENAI_API_KEY_LLM",
+    "AZURE_OPENAI_ENDPOINT_EMBEDDING",
+    "AZURE_OPENAI_ENDPOINT_LLM"
+]
+missing_vars = [var for var in required_vars if not os.getenv(var)]
+if missing_vars:
+    raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
+# Pinecone Configuration
+PINECONE_INDEX_NAME = "crag-index"
+
+# Initialize Pinecone
+pc = Pinecone()
+
+
+def setup_pinecone_index():
+    """Setup Pinecone index with proper existing index handling"""
+    existing_indexes = [index.name for index in pc.list_indexes()]
+
+    if PINECONE_INDEX_NAME not in existing_indexes:
+        print(f"📦 Creating new Pinecone index: {PINECONE_INDEX_NAME}")
+        pc.create_index(
+            name=PINECONE_INDEX_NAME,
+            spec={"serverless": {"cloud": "aws", "region": "us-east-1"}},
+            dimension=1536
+        )
+        print(f"✅ Index {PINECONE_INDEX_NAME} created successfully")
+        return True  # New index created
+    else:
+        print(f"📋 Using existing Pinecone index: {PINECONE_INDEX_NAME}")
+        return False  # Index already exists
+
+
+# Setup index and track if it's new
+is_new_index = setup_pinecone_index()
+
+# Make urls global and mutable
+urls = [
+    "https://lilianweng.github.io/posts/2023-06-23-agent/",
+    "https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/",
+    "https://lilianweng.github.io/posts/2023-10-25-adv-attack-llm/",
+]
+
+
+def clear_vectorstore(vectorstore):
+    """Delete all vectors in the namespace"""
+    vectorstore._index.delete(
+        namespace="default",
+        delete_all=True
+    )
+
+
+def generate_deterministic_id(content: str, source: str = "") -> str:
+    """Generate deterministic ID based on content hash"""
+    content_hash = hashlib.md5((content + source).encode()).hexdigest()
+    return f"doc_{content_hash[:16]}"
+
+
+def check_index_has_documents(vectorstore) -> bool:
+    """Check if index already has documents"""
+    try:
+        # Try to query the index to see if it has any vectors
+        index_stats = vectorstore._index.describe_index_stats()
+        total_vectors = index_stats.get('total_vector_count', 0)
+        namespace_stats = index_stats.get('namespaces', {})
+        default_namespace_count = namespace_stats.get('default', {}).get('vector_count', 0)
+
+        print(f"📊 Index stats - Total vectors: {total_vectors}, Default namespace: {default_namespace_count}")
+        return default_namespace_count > 0
+    except Exception as e:
+        print(f"⚠️ Could not check index stats: {e}")
+        return False
+
+
+def init_retriever():
+    """Initialize retriever with document deduplication"""
+    global urls, is_new_index
+
+    # Azure OpenAI Embeddings
+    embeddings = AzureOpenAIEmbeddings(
+        api_key=AZURE_OPENAI_API_KEY_EMBEDDING,
+        api_version=AZURE_OPENAI_API_VERSION,
+        azure_endpoint=AZURE_OPENAI_ENDPOINT_EMBEDDING,
+        model=AZURE_EMBEDDING_MODEL
+    )
+
+    vectorstore = PineconeVectorStore(
+        embedding=embeddings,
+        index_name=PINECONE_INDEX_NAME,
+        namespace="default"
+    )
+
+    # Check if we need to load documents
+    if is_new_index:
+        print("🆕 New index detected - loading initial documents")
+        should_load_docs = True
+    else:
+        has_docs = check_index_has_documents(vectorstore)
+        if has_docs:
+            print("📚 Index already contains documents - skipping reload")
+            should_load_docs = False
+        else:
+            print("📭 Index exists but empty - loading documents")
+            should_load_docs = True
+
+    # Load documents only if needed
+    if should_load_docs:
+        print(f"🔄 Loading documents from {len(urls)} URLs...")
+        docs = [WebBaseLoader(url).load() for url in urls]
+        docs_list = [item for sublist in docs for item in sublist]
+
+        text_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+            chunk_size=250, chunk_overlap=0
+        )
+        doc_splits = text_splitter.split_documents(docs_list)
+
+        # Generate deterministic IDs to prevent duplicates
+        doc_ids = []
+        for doc in doc_splits:
+            doc_id = generate_deterministic_id(
+                content=doc.page_content[:100],  # Use first 100 chars for ID
+                source=doc.metadata.get('source', '')
+            )
+            doc_ids.append(doc_id)
+
+        print(f"📝 Adding {len(doc_splits)} document chunks with deterministic IDs")
+        vectorstore.add_documents(documents=doc_splits, ids=doc_ids)
+        print("✅ Documents loaded successfully")
+    else:
+        print("⏭️ Skipped document loading - using existing documents")
+
+    return vectorstore.as_retriever(), vectorstore
+
+
+# Initialize LLMs and tools
+class GradeDocuments(LCBaseModel):
+    """Binary score for relevance check on retrieved documents."""
+    binary_score: str = Field(
+        description="Documents are relevant to the question, 'yes' or 'no'"
+    )
+
+
+def init_components():
+    """Initialize CRAG components with Azure OpenAI"""
+
+    # Azure OpenAI LLM with function call (GPT-4o-mini for all tasks)
+    llm = AzureChatOpenAI(
+        api_key=AZURE_OPENAI_API_KEY_LLM,
+        api_version=AZURE_OPENAI_API_VERSION,
+        azure_endpoint=AZURE_OPENAI_ENDPOINT_LLM,
+        model=AZURE_GPT4_MODEL,
+        temperature=0
+    )
+    structured_llm_grader = llm.with_structured_output(GradeDocuments)
+
+    # Grader prompt
+    system = """You are a grader assessing relevance of a retrieved document to a user question.
+    If the document contains keyword(s) or semantic meaning related to the question, grade it as relevant.
+    Give a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question."""
+    grade_prompt = ChatPromptTemplate.from_messages([
+        ("system", system),
+        ("human", "Retrieved document: \n\n {document} \n\n User question: {question}"),
+    ])
+
+    retrieval_grader = grade_prompt | structured_llm_grader
+
+    # RAG components with Azure OpenAI (GPT-4o-mini)
+    prompt = hub.pull("rlm/rag-prompt")
+    llm_gen = AzureChatOpenAI(
+        api_key=AZURE_OPENAI_API_KEY_LLM,
+        api_version=AZURE_OPENAI_API_VERSION,
+        azure_endpoint=AZURE_OPENAI_ENDPOINT_LLM,
+        model=AZURE_GPT4_MODEL,
+        temperature=0
+    )
+    rag_chain = prompt | llm_gen | StrOutputParser()
+
+    # Question rewriter with Azure OpenAI (GPT-4o-mini)
+    llm_rewriter = AzureChatOpenAI(
+        api_key=AZURE_OPENAI_API_KEY_LLM,
+        api_version=AZURE_OPENAI_API_VERSION,
+        azure_endpoint=AZURE_OPENAI_ENDPOINT_LLM,
+        model=AZURE_GPT4_MODEL,
+        temperature=0
+    )
+    system_rewrite = """You a question re-writer that converts an input question to a better version that is optimized
+    for web search. Look at the input and try to reason about the underlying semantic intent / meaning."""
+    re_write_prompt = ChatPromptTemplate.from_messages([
+        ("system", system_rewrite),
+        ("human", "Here is the initial question: \n\n {question} \n Formulate an improved question."),
+    ])
+    question_rewriter = re_write_prompt | llm_rewriter | StrOutputParser()
+
+    # Web search
+    web_search_tool = TavilySearchResults(k=3)
+
+    return retrieval_grader, rag_chain, question_rewriter, web_search_tool
+
+
+# Graph functions
+def retrieve(state):
+    """Retrieve documents from vector store"""
+    question = state["question"]
+    documents = retriever.get_relevant_documents(question)
+    return {"documents": documents, "question": question}
+
+
+def generate(state):
+    """Generate answer using RAG chain"""
+    question = state["question"]
+    documents = state["documents"]
+    generation = rag_chain.invoke({"context": documents, "question": question})
+    return {"documents": documents, "question": question, "generation": generation}
+
+
+def grade_documents(state):
+    """Grade retrieved documents for relevance"""
+    question = state["question"]
+    documents = state["documents"]
+    filtered_docs = []
+    web_search = "No"
+    for d in documents:
+        score = retrieval_grader.invoke({"question": question, "document": d.page_content})
+        grade = score.binary_score
+        if grade == "yes":
+            filtered_docs.append(d)
+        else:
+            web_search = "Yes"
+            continue
+    return {"documents": filtered_docs, "question": question, "web_search": web_search}
+
+
+def transform_query(state):
+    """Transform query for better web search"""
+    question = state["question"]
+    documents = state["documents"]
+    better_question = question_rewriter.invoke({"question": question})
+    return {"documents": documents, "question": better_question}
+
+
+def web_search(state):
+    """Perform web search when documents are not relevant"""
+    question = state["question"]
+    documents = state["documents"]
+    docs = web_search_tool.invoke({"query": question})
+    web_results = "\n".join([d["content"] for d in docs])
+    web_results = Document(page_content=web_results)
+    documents.append(web_results)
+    return {"documents": documents, "question": question}
+
+
+def decide_to_generate(state):
+    """Decide whether to do web search or generate answer"""
+    web_search = state["web_search"]
+    return "transform_query" if web_search == "Yes" else "generate"
+
+
+# Initialize workflow
+def init_workflow():
+    """Initialize CRAG workflow graph"""
+
+    class GraphState(Dict):
+        question: str
+        generation: str
+        web_search: str
+        documents: List[str]
+
+    workflow = StateGraph(GraphState)
+
+    # Define nodes
+    workflow.add_node("retrieve", retrieve)
+    workflow.add_node("grade_documents", grade_documents)
+    workflow.add_node("generate", generate)
+    workflow.add_node("transform_query", transform_query)
+    workflow.add_node("web_search_node", web_search)
+
+    # Build graph
+    workflow.add_edge(START, "retrieve")
+    workflow.add_edge("retrieve", "grade_documents")
+    workflow.add_conditional_edges(
+        "grade_documents",
+        decide_to_generate,
+        {
+            "transform_query": "transform_query",
+            "generate": "generate",
+        },
+    )
+    workflow.add_edge("transform_query", "web_search_node")
+    workflow.add_edge("web_search_node", "generate")
+    workflow.add_edge("generate", END)
+
+    return workflow.compile()
+
+
+# Initialize components at startup
+print("🚀 Initializing CRAG components with Azure OpenAI...")
+print(f"📍 Embedding Endpoint: {AZURE_OPENAI_ENDPOINT_EMBEDDING}")
+print(f"📍 LLM Endpoint: {AZURE_OPENAI_ENDPOINT_LLM}")
+print(f"📍 API Version: {AZURE_OPENAI_API_VERSION}")
+print(f"📍 Embedding Model: {AZURE_EMBEDDING_MODEL}")
+print(f"📍 LLM Model: {AZURE_GPT4_MODEL} (for all tasks)")
+
+try:
+    retriever, vectorstore = init_retriever()
+    print("✅ Vector store initialized successfully")
+
+    retrieval_grader, rag_chain, question_rewriter, web_search_tool = init_components()
+    print("✅ LLM components initialized successfully")
+
+    crag_app = init_workflow()
+    print("✅ CRAG workflow initialized successfully")
+
+    print("🎉 CRAG initialization complete!")
+except Exception as e:
+    print(f"❌ Error during initialization: {str(e)}")
+    raise
+
+
+# API Models
+class Question(BaseModel):
+    question: str
+
+
+class Response(BaseModel):
+    answer: str
+
+
+class UpdateUrlsRequest(BaseModel):
+    urls: List[str]
+
+
+class UpdateUrlsResponse(BaseModel):
+    status: str
+    message: str
+
+
+@app.post("/ask", response_model=Response)
+async def ask_question(question: Question):
+    """Ask a question using CRAG workflow"""
+    try:
+        print(f"🔍 Processing question: {question.question}")
+        result = crag_app.invoke({"question": question.question})
+        print(f"✅ Generated answer: {result['generation'][:100]}...")
+        return Response(answer=result["generation"])
+    except Exception as e:
+        print(f"❌ Error processing question: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/update_urls", response_model=UpdateUrlsResponse)
+async def update_urls(request: UpdateUrlsRequest):
+    """Update URLs in the knowledge base with deduplication"""
+    global urls, retriever, vectorstore
+    try:
+        print(f"🔄 Updating URLs: {request.urls}")
+        urls = request.urls
+
+        # Clear the Pinecone DB to avoid conflicts
+        clear_vectorstore(vectorstore)
+        print("🗑️ Cleared existing vector store")
+
+        # Force reload documents since we cleared the store
+        global is_new_index
+        original_is_new = is_new_index
+        is_new_index = True  # Temporarily treat as new to force reload
+
+        # Re-initialize retriever and vectorstore with new URLs
+        retriever, vectorstore = init_retriever()
+
+        # Restore original state
+        is_new_index = original_is_new
+
+        print("✅ Reinitialised vector store with new URLs")
+
+        return UpdateUrlsResponse(
+            status="success",
+            message=f"URLs updated and vectorstore refreshed with {len(urls)} sources."
+        )
+    except Exception as e:
+        print(f"❌ Error updating URLs: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "message": "CRAG API is running with Azure OpenAI (Separate Keys)",
+        "azure_endpoints": {
+            "embedding": AZURE_OPENAI_ENDPOINT_EMBEDDING,
+            "llm": AZURE_OPENAI_ENDPOINT_LLM
+        },
+        "models": {
+            "embedding": AZURE_EMBEDDING_MODEL,
+            "llm": AZURE_GPT4_MODEL
+        }
+    }
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
