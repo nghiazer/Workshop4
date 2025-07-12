@@ -62,3 +62,7 @@ coverage.xml
 # Pyre type checker
 .pyre/
 
+/AI Assistantv2/node_modules/
+/AI Assistantv2/.angular/
+/AI Assistantv2/.idea/
+/AI Assistantv2/__MACOSX/

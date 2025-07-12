@@ -1,10 +1,49 @@
-uvicorn~=0.34.3
-fastapi~=0.115.9
-pydantic~=2.11.7
-langchain~=0.3.25
-langchain-community~=0.3.25
-langchain-openai~=0.3.23
-langchain-core~=0.3.68
-langgraph~=0.5.2
-pinecone~=7.3.0
-python-dotenv~=1.1.0
+# Core FastAPI and Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+python-dotenv==1.0.0
+httpx==0.25.2
+
+# LangChain Framework
+langchain==0.3.10
+langchain-community==0.3.10
+langchain-core==0.3.21
+langchain-openai==0.2.10
+langchain-pinecone==0.2.0
+langgraph==0.2.50
+
+# Vector Database
+pinecone-client[grpc]==5.0.1
+
+# Web Search
+tavily-python==0.5.0
+
+# Web Scraping
+beautifulsoup4==4.12.2
+lxml==4.9.3
+
+# Machine Learning - PyTorch CPU Only
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.1.2+cpu
+torchvision==0.16.2+cpu
+torchaudio==2.1.2+cpu
+
+# Text-to-Speech Dependencies
+transformers>=4.35.0,<5.0.0
+soundfile>=0.12.1
+librosa>=0.10.1
+sentencepiece>=0.1.99
+
+# Core Scientific Computing
+numpy>=1.24.0,<2.0.0
+scipy>=1.10.0
+
+# Optional Performance Enhancements
+# accelerate>=0.24.0  # Uncomment for faster model loading
+# tokenizers>=0.15.0  # Usually included with transformers
+
+# Development Dependencies (optional)
+# pytest>=7.0.0
+# black>=23.0.0
+# flake8>=6.0.0
