@@ -28,7 +28,7 @@ from pinecone import Pinecone
 from dotenv import load_dotenv
 
 # Initialize the FastAPI app for your AI backend
-app = FastAPI(title="CRAG API", description="Corrective RAG API with Azure OpenAI and TTS")
+app = FastAPI(title="CRAG API", description="Corrective RAG API with Azure OpenAI and Coqui TTS")
 
 # Create a directory to store generated audio files for TTS responses
 AUDIO_DIR = Path("audio_files")
@@ -53,120 +53,126 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# TTSService provides text-to-speech functionality using Microsoft's SpeechT5 model
+
+# TTSService provides text-to-speech functionality using Coqui TTS
 class TTSService:
     def __init__(self):
         # Model components are loaded only when needed to save memory and startup time
-        self.model = None
-        self.processor = None
-        self.vocoder = None
-        self.speaker_embeddings = None
+        self.tts = None
         self._model_loaded = False
         self._loading_lock = threading.Lock()  # Prevent race conditions on model load
 
+        # Available Coqui TTS models - you can change this to other models
+        self.model_name = "tts_models/en/ljspeech/tacotron2-DDC"
+
+        # Alternative models you can try:
+        # self.model_name = "tts_models/en/ljspeech/glow-tts"
+        # self.model_name = "tts_models/en/vctk/vits"
+        # self.model_name = "tts_models/en/sam/tacotron-DDC"
+
     def _load_model(self):
-        """Load the SpeechT5 model, processor, vocoder, and speaker embedding for TTS."""
+        """Load the Coqui TTS model."""
         if self._model_loaded:
             return
+
         with self._loading_lock:
             if self._model_loaded:
                 return
+
             try:
-                print("🔄 Loading SpeechT5 TTS model...")
-                from transformers import SpeechT5Processor, SpeechT5ForTextToSpeech, SpeechT5HifiGan
-                import torch
-                import numpy as np
+                print("🔄 Loading Coqui TTS model...")
+                from TTS.api import TTS
 
-                # Load model and processor from HuggingFace
-                self.processor = SpeechT5Processor.from_pretrained("microsoft/speecht5_tts")
-                self.model = SpeechT5ForTextToSpeech.from_pretrained("microsoft/speecht5_tts")
-                self.vocoder = SpeechT5HifiGan.from_pretrained("microsoft/speecht5_hifigan")
+                # Initialize TTS with the selected model
+                self.tts = TTS(model_name=self.model_name, progress_bar=False)
 
-                # Try to fetch a speaker embedding for voice characteristics
-                print("🔊 Loading speaker embeddings...")
-                try:
-                    # Attempt to load from a public HuggingFace dataset
-                    import requests
-                    embedding_url = "https://huggingface.co/datasets/Matthijs/cmu-arctic-xvectors/resolve/main/cmu_us_bdl_arctic-wav-22050_embeddings.pkl"
-                    # If this fails, use a fallback
-                    self.speaker_embeddings = self._create_speaker_embedding()
-                except Exception as embed_error:
-                    print(f"⚠️ Using fallback speaker embedding: {embed_error}")
-                    self.speaker_embeddings = self._create_speaker_embedding()
                 self._model_loaded = True
-                print("✅ SpeechT5 model loaded successfully")
+                print(f"✅ Coqui TTS model loaded successfully: {self.model_name}")
+
             except Exception as e:
-                print(f"❌ Error loading SpeechT5 model: {e}")
+                print(f"❌ Error loading Coqui TTS model: {e}")
+                print("💡 Make sure you have installed TTS: pip install TTS")
                 raise
 
-    def _create_speaker_embedding(self):
-        """Create a random but realistic speaker embedding vector (for voice style)."""
-        import torch
-        import numpy as np
-        np.random.seed(42)
-        embedding = np.random.normal(0, 0.1, 512)
-        embedding[0:50] = np.random.normal(0.2, 0.05, 50)  # Pitch
-        embedding[50:100] = np.random.normal(-0.1, 0.03, 50)  # Formant
-        embedding[100:150] = np.random.normal(0.15, 0.04, 50)  # Quality
-        embedding[150:200] = np.random.normal(0.0, 0.02, 50)  # Neutral
-        embedding_tensor = torch.tensor(embedding, dtype=torch.float32)
-        return embedding_tensor.unsqueeze(0)  # Batch dimension
-
     async def generate_audio(self, text: str) -> str:
-        """Generate a speech audio file from text, using TTS."""
+        """Generate a speech audio file from text, using Coqui TTS."""
         try:
             # Load the TTS model if it's not already loaded
             if not self._model_loaded:
                 await asyncio.get_event_loop().run_in_executor(None, self._load_model)
+
             # Generate audio in a background thread to avoid blocking the main async loop
             audio_path = await asyncio.get_event_loop().run_in_executor(
                 None, self._generate_audio_sync, text
             )
             return audio_path
+
         except Exception as e:
             print(f"❌ TTS generation error: {e}")
             raise HTTPException(status_code=500, detail=f"TTS generation failed: {str(e)}")
 
     def _generate_audio_sync(self, text: str) -> str:
-        """Synchronously generate and save speech audio from text."""
-        import torch
-        import soundfile as sf
-        import librosa
-        import numpy as np
-        text = self._clean_text(text)  # Clean up text for speech
-        print(f"🔊 Generating TTS for: {text[:50]}...")
-        inputs = self.processor(text=text, return_tensors="pt")
-        with torch.no_grad():
-            speech = self.model.generate_speech(
-                inputs["input_ids"],
-                self.speaker_embeddings,
-                vocoder=self.vocoder
+        """Synchronously generate and save speech audio from text using Coqui TTS."""
+        try:
+            # Clean up text for speech
+            text = self._clean_text(text)
+            print(f"🔊 Generating TTS for: {text[:50]}...")
+
+            # Generate unique filename for this audio
+            audio_id = str(uuid4())[:8]
+            audio_filename = f"tts_{audio_id}.wav"
+            audio_path = AUDIO_DIR / audio_filename
+
+            # Generate speech using Coqui TTS
+            self.tts.tts_to_file(
+                text=text,
+                file_path=str(audio_path)
             )
-        audio_id = str(uuid4())[:8]
-        audio_filename = f"tts_{audio_id}.wav"
-        audio_path = AUDIO_DIR / audio_filename
-        audio_data = speech.cpu().numpy()
-        # Time-stretch and normalize audio for better quality
-        audio_slowed = librosa.effects.time_stretch(audio_data, rate=0.75, hop_length=256, n_fft=1024)
-        audio_normalized = librosa.util.normalize(audio_slowed)
-        audio_boosted = audio_normalized * 1.25
-        audio_final = np.clip(audio_boosted, -1.0, 1.0)
-        sf.write(str(audio_path), audio_final, 16000)
-        print(f"✅ TTS audio saved: {audio_filename}")
-        return f"/audio/{audio_filename}"
+
+            print(f"✅ TTS audio saved: {audio_filename}")
+            return f"/audio/{audio_filename}"
+
+        except Exception as e:
+            print(f"❌ Error in TTS generation: {e}")
+            raise
 
     def _clean_text(self, text: str) -> str:
         """Remove markdown and special characters for clearer speech."""
         import re
-        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
-        text = re.sub(r'\*(.*?)\*', r'\1', text)
-        text = re.sub(r'`(.*?)`', r'\1', text)
-        text = re.sub(r'#{1,6}\s*', '', text)
-        text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text)
+
+        # Remove markdown formatting
+        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)  # **bold**
+        text = re.sub(r'\*(.*?)\*', r'\1', text)  # *italic*
+        text = re.sub(r'`(.*?)`', r'\1', text)  # `code`
+        text = re.sub(r'#{1,6}\s*', '', text)  # Headers
+        text = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', text)  # [text](link)
+
+        # Remove special characters but keep punctuation
         text = re.sub(r'[^\w\s\.,!?;:()-]', '', text)
+
+        # Limit length for TTS
         if len(text) > 500:
             text = text[:500] + "..."
+
         return text.strip()
+
+    def set_model(self, model_name: str):
+        """Change the TTS model (requires reloading)."""
+        if model_name != self.model_name:
+            self.model_name = model_name
+            self._model_loaded = False
+            self.tts = None
+            print(f"🔄 TTS model changed to: {model_name}")
+
+    def get_available_models(self):
+        """Get list of available Coqui TTS models."""
+        try:
+            from TTS.api import TTS
+            return TTS.list_models()
+        except Exception as e:
+            print(f"❌ Error getting available models: {e}")
+            return []
+
 
 # Instantiate the TTS service at startup
 tts_service = TTSService()
@@ -200,6 +206,7 @@ if missing_vars:
 PINECONE_INDEX_NAME = "crag-index"
 pc = Pinecone()
 
+
 def setup_pinecone_index():
     """Check if the Pinecone index exists; create it if missing."""
     existing_indexes = [index.name for index in pc.list_indexes()]
@@ -216,6 +223,7 @@ def setup_pinecone_index():
         print(f"📋 Using existing Pinecone index: {PINECONE_INDEX_NAME}")
         return False  # Index already exists
 
+
 # Track whether the index was created fresh or already exists
 is_new_index = setup_pinecone_index()
 
@@ -226,6 +234,7 @@ urls = [
     "https://lilianweng.github.io/posts/2023-10-25-adv-attack-llm/",
 ]
 
+
 def clear_vectorstore(vectorstore):
     """Remove all vectors from the index (used when updating URLs)."""
     vectorstore._index.delete(
@@ -233,10 +242,12 @@ def clear_vectorstore(vectorstore):
         delete_all=True
     )
 
+
 def generate_deterministic_id(content: str, source: str = "") -> str:
     """Generate a unique, repeatable ID for each document chunk."""
     content_hash = hashlib.md5((content + source).encode()).hexdigest()
     return f"doc_{content_hash[:16]}"
+
 
 def check_index_has_documents(vectorstore) -> bool:
     """Check if the Pinecone index has any documents loaded."""
@@ -250,6 +261,7 @@ def check_index_has_documents(vectorstore) -> bool:
     except Exception as e:
         print(f"⚠️ Could not check index stats: {e}")
         return False
+
 
 def init_retriever():
     """Set up the document retriever and load documents if necessary."""
@@ -303,12 +315,14 @@ def init_retriever():
         print("⏭️ Skipped document loading - using existing documents")
     return vectorstore.as_retriever(), vectorstore
 
+
 # Define a Pydantic model for grading document relevance
 class GradeDocuments(LCBaseModel):
     """Used by the LLM to return a binary score for document relevance."""
     binary_score: str = Field(
         description="Documents are relevant to the question, 'yes' or 'no'"
     )
+
 
 def init_components():
     """Set up the main CRAG components: LLMs, prompts, retrievers, graders."""
@@ -363,6 +377,7 @@ def init_components():
 
     return retrieval_grader, rag_chain, question_rewriter, web_search_tool
 
+
 # Main logic functions for each workflow step
 def retrieve(state):
     """Retrieve documents from the vector store based on the user question."""
@@ -370,12 +385,14 @@ def retrieve(state):
     documents = retriever.get_relevant_documents(question)
     return {"documents": documents, "question": question}
 
+
 def generate(state):
     """Generate an answer to the question using the RAG chain and retrieved documents."""
     question = state["question"]
     documents = state["documents"]
     generation = rag_chain.invoke({"context": documents, "question": question})
     return {"documents": documents, "question": question, "generation": generation}
+
 
 def grade_documents(state):
     """Grade the relevance of each document and decide if web search is needed."""
@@ -393,12 +410,14 @@ def grade_documents(state):
             continue
     return {"documents": filtered_docs, "question": question, "web_search": web_search}
 
+
 def transform_query(state):
     """Rewrite the question to improve its suitability for web search."""
     question = state["question"]
     documents = state["documents"]
     better_question = question_rewriter.invoke({"question": question})
     return {"documents": documents, "question": better_question}
+
 
 def web_search(state):
     """Perform a web search if the knowledge base is insufficient."""
@@ -410,18 +429,22 @@ def web_search(state):
     documents.append(web_results)
     return {"documents": documents, "question": question}
 
+
 def decide_to_generate(state):
     """Decide whether to generate an answer or perform a web search next."""
     web_search = state["web_search"]
     return "transform_query" if web_search == "Yes" else "generate"
 
+
 def init_workflow():
     """Define the CRAG workflow as a directed graph of steps."""
+
     class GraphState(Dict):
         question: str
         generation: str
         web_search: str
         documents: List[str]
+
     workflow = StateGraph(GraphState)
     workflow.add_node("retrieve", retrieve)
     workflow.add_node("grade_documents", grade_documents)
@@ -443,6 +466,7 @@ def init_workflow():
     workflow.add_edge("generate", END)
     return workflow.compile()
 
+
 # Initialization block: sets up the retriever, LLMs, workflow, etc.
 print("🚀 Initializing CRAG components with Azure OpenAI...")
 print(f"📍 Embedding Endpoint: {AZURE_OPENAI_ENDPOINT_EMBEDDING}")
@@ -462,24 +486,40 @@ except Exception as e:
     print(f"❌ Error during initialization: {str(e)}")
     raise
 
+
 # API Models: define data formats for requests and responses
 class Question(BaseModel):
     question: str
 
+
 class Response(BaseModel):
     answer: str
+
 
 class TTSResponse(BaseModel):
     answer: str
     audio_url: Optional[str] = None
     has_audio: bool = False
 
+
 class UpdateUrlsRequest(BaseModel):
     urls: List[str]
+
 
 class UpdateUrlsResponse(BaseModel):
     status: str
     message: str
+
+
+class TTSModelRequest(BaseModel):
+    model_name: str
+
+
+class TTSModelResponse(BaseModel):
+    status: str
+    message: str
+    current_model: str
+
 
 # Main API endpoints
 @app.post("/ask", response_model=Response)
@@ -493,6 +533,7 @@ async def ask_question(question: Question):
     except Exception as e:
         print(f"❌ Error processing question: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/ask_with_tts", response_model=TTSResponse)
 async def ask_question_with_tts(question: Question):
@@ -521,6 +562,7 @@ async def ask_question_with_tts(question: Question):
         print(f"❌ Error processing question: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/update_urls", response_model=UpdateUrlsResponse)
 async def update_urls(request: UpdateUrlsRequest):
     """Update the knowledge base URLs and reload the vector store."""
@@ -544,21 +586,59 @@ async def update_urls(request: UpdateUrlsRequest):
         print(f"❌ Error updating URLs: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/set_tts_model", response_model=TTSModelResponse)
+async def set_tts_model(request: TTSModelRequest):
+    """Change the TTS model."""
+    try:
+        tts_service.set_model(request.model_name)
+        return TTSModelResponse(
+            status="success",
+            message=f"TTS model changed to: {request.model_name}",
+            current_model=request.model_name
+        )
+    except Exception as e:
+        print(f"❌ Error setting TTS model: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/tts_models")
+async def get_tts_models():
+    """Get list of available TTS models."""
+    try:
+        models = tts_service.get_available_models()
+        return {
+            "status": "success",
+            "current_model": tts_service.model_name,
+            "available_models": models
+        }
+    except Exception as e:
+        print(f"❌ Error getting TTS models: {str(e)}")
+        return {
+            "status": "error",
+            "current_model": tts_service.model_name,
+            "available_models": [],
+            "error": str(e)
+        }
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint to confirm API status and model configs."""
     return {
         "status": "healthy",
-        "message": "CRAG API is running with Azure OpenAI (Separate Keys)",
+        "message": "CRAG API is running with Azure OpenAI and Coqui TTS",
         "azure_endpoints": {
             "embedding": AZURE_OPENAI_ENDPOINT_EMBEDDING,
             "llm": AZURE_OPENAI_ENDPOINT_LLM
         },
         "models": {
             "embedding": AZURE_EMBEDDING_MODEL,
-            "llm": AZURE_GPT4_MODEL
+            "llm": AZURE_GPT4_MODEL,
+            "tts": tts_service.model_name
         }
     }
+
 
 # Local run entrypoint for development
 if __name__ == "__main__":
