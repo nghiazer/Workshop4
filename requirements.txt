@@ -23,27 +23,31 @@ tavily-python==0.5.0
 beautifulsoup4==4.12.2
 lxml==4.9.3
 
-# Machine Learning - PyTorch CPU Only
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.1.2+cpu
-torchvision==0.16.2+cpu
-torchaudio==2.1.2+cpu
+# Text-to-Speech - Coqui TTS
+TTS>=0.22.0
 
-# Text-to-Speech Dependencies
-transformers>=4.35.0,<5.0.0
-soundfile>=0.12.1
-librosa>=0.10.1
-sentencepiece>=0.1.99
-
-# Core Scientific Computing
+# Core Scientific Computing (required by TTS)
 numpy>=1.24.0,<2.0.0
 scipy>=1.10.0
 
+# Audio Processing (automatically installed with TTS)
+# soundfile - included with TTS
+# librosa - included with TTS
+# torch - included with TTS
+
 # Optional Performance Enhancements
 # accelerate>=0.24.0  # Uncomment for faster model loading
-# tokenizers>=0.15.0  # Usually included with transformers
 
 # Development Dependencies (optional)
 # pytest>=7.0.0
 # black>=23.0.0
 # flake8>=6.0.0
+
+# Note: The following packages are NO LONGER NEEDED with Coqui TTS:
+# transformers>=4.35.0,<5.0.0  # Replaced by TTS package
+# soundfile>=0.12.1             # Included with TTS
+# librosa>=0.10.1               # Included with TTS
+# sentencepiece>=0.1.99         # Not needed for Coqui TTS
+# torch==2.1.2+cpu              # Automatically handled by TTS
+# torchvision==0.16.2+cpu       # Not needed
+# torchaudio==2.1.2+cpu         # Included with TTS

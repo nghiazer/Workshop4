@@ -1,11 +1,11 @@
 # 🤖 CRAG Assistant with Text-to-Speech
 
-A sophisticated AI chatbot system using **Corrective RAG (Retrieval-Augmented Generation)** with **SpeechT5 Text-to-Speech** capabilities. The system intelligently retrieves information from documents, searches the web when needed, and provides audio responses.
+A sophisticated AI chatbot system using **Corrective RAG (Retrieval-Augmented Generation)** with **Coqui TTS** capabilities. The system intelligently retrieves information from documents, searches the web when needed, and provides high-quality audio responses.
 
 ## 🌟 Features
 
 - **🔍 Corrective RAG**: Smart document retrieval with web search fallback
-- **🗣️ Text-to-Speech**: High-quality audio responses using SpeechT5
+- **🗣️ Text-to-Speech**: High-quality audio responses using Coqui TTS
 - **🌐 Web Search Integration**: Tavily search when documents are insufficient
 - **📚 Knowledge Base Management**: Dynamic URL management for document sources
 - **🎨 Modern UI**: Angular frontend with real-time audio controls
@@ -19,7 +19,7 @@ User Question → Document Retrieval → Relevance Grading → Decision
                      ↓                      ↓             ↓
                  Found Relevant?        Need Web Search?  Generate Answer
                      ↓                      ↓             ↓
-                 Generate Answer    →   Web Search   →   TTS Audio
+                 Generate Answer    →   Web Search   →   Coqui TTS Audio
 ```
 
 ## 🚀 Quick Start
@@ -117,6 +117,11 @@ Deploy these models in your Azure OpenAI resource:
 - `GET /health` - Health check
 - `GET /audio/{filename}` - Serve TTS audio files
 
+### TTS Management Endpoints
+
+- `POST /set_tts_model` - Change TTS model
+- `GET /tts_models` - List available TTS models
+
 ### Example Usage
 
 ```bash
@@ -134,16 +139,38 @@ curl -X POST "http://localhost:8000/ask_with_tts" \
 curl -X POST "http://localhost:8000/update_urls" \
   -H "Content-Type: application/json" \
   -d '{"urls": ["https://example.com/doc1", "https://example.com/doc2"]}'
+
+# Change TTS model
+curl -X POST "http://localhost:8000/set_tts_model" \
+  -H "Content-Type: application/json" \
+  -d '{"model_name": "tts_models/en/vctk/vits"}'
+
+# List available TTS models
+curl http://localhost:8000/tts_models
 ```
 
 ## 🎵 Text-to-Speech Features
 
-- **High-quality synthesis** using SpeechT5
-- **Natural female voice** with optimized characteristics
+- **High-quality synthesis** using Coqui TTS
+- **Multiple voice models** available:
+  - `tts_models/en/ljspeech/tacotron2-DDC` (default)
+  - `tts_models/en/ljspeech/glow-tts`
+  - `tts_models/en/vctk/vits`
+  - `tts_models/en/sam/tacotron-DDC`
+- **Runtime model switching** without restart
 - **Audio controls** (play/pause/stop)
 - **Fallback support** to Web Speech API
 - **Auto-play option** for new responses
 - **File-based audio** serving via static endpoints
+
+### Recommended TTS Models
+
+| Model | Quality | Speed | Description |
+|-------|---------|-------|-------------|
+| `tts_models/en/ljspeech/tacotron2-DDC` | High | Medium | Default, balanced quality/speed |
+| `tts_models/en/ljspeech/glow-tts` | High | Fast | Flow-based, natural sounding |
+| `tts_models/en/vctk/vits` | Very High | Medium | Multi-speaker, excellent quality |
+| `tts_models/en/sam/tacotron-DDC` | High | Medium | Alternative voice character |
 
 ## 🎯 CRAG Workflow
 
@@ -151,7 +178,7 @@ curl -X POST "http://localhost:8000/update_urls" \
 2. **Grade**: Assess document relevance using LLM
 3. **Decision**: Use documents if relevant, otherwise search web
 4. **Generate**: Create accurate, source-based response
-5. **Synthesize**: Convert text to speech (optional)
+5. **Synthesize**: Convert text to speech using Coqui TTS (optional)
 
 ## 🔧 Troubleshooting
 
@@ -177,42 +204,43 @@ Incorrect API key provided
 ```
 Pinecone warnings about duplicate vectors
 ```
-**Fix**: Automatic deduplication implemented. Clear existing index if needed:
-```python
-# In API, index is auto-managed with deduplication
-```
+**Fix**: Automatic deduplication implemented. Clear existing index if needed.
 
-#### **TTS Dependencies Missing**
+#### **Coqui TTS Installation Issues**
 ```
-ModuleNotFoundError: No module named 'sentencepiece'
+ModuleNotFoundError: No module named 'TTS'
 ```
 **Fix**:
 ```bash
-pip install sentencepiece soundfile librosa
+pip install TTS
 ```
 
-#### **PyTorch Version Issues**
+#### **TTS Model Download Issues**
 ```
-PyTorch >= 2.1 is required but found 2.0.1
+Failed to download model
 ```
 **Fix**:
-```bash
-pip uninstall torch torchvision torchaudio
-pip install torch==2.1.2+cpu torchvision==0.16.2+cpu torchaudio==2.1.2+cpu \
-  --extra-index-url https://download.pytorch.org/whl/cpu
-```
+- Ensure stable internet connection
+- First model download can take 5-10 minutes
+- Check available disk space (models ~100-500MB each)
 
-#### **CUDA Library Errors**
+#### **TTS Generation Timeout**
 ```
-libcufft.so.10: cannot open shared object file
+TTS generation failed: timeout
 ```
-**Fix**: Use CPU-only PyTorch (already configured in requirements)
+**Fixes**:
+- First request takes longer for model loading
+- Check available memory (models need ~500MB-1GB RAM)
+- Try a different, lighter model
 
-#### **Dataset Loading Deprecated**
+#### **Audio File Access Issues**
 ```
-Dataset scripts are no longer supported
+Cannot access audio file
 ```
-**Fix**: Custom speaker embeddings implemented (automatically handled)
+**Fix**: 
+- Check `audio_files/` directory permissions
+- Verify static file serving is working
+- Try different browser if CORS issues
 
 #### **Azure Content Policy Violations**
 ```
@@ -223,30 +251,30 @@ Response was filtered due to content management policy
 - Use broader, less specific terms
 - Error handling implemented for graceful degradation
 
-#### **Model Loading Timeout**
-```
-TTS generation failed: timeout
-```
-**Fix**: First request takes 10-15 seconds for model download. Wait for completion.
-
 ### Performance Optimization
 
 #### **Memory Usage**
-- TTS models: ~1-2GB RAM when loaded
+- Coqui TTS models: ~500MB-1GB RAM when loaded
 - Lazy loading: Models load only when needed
 - Audio files: Auto-cleanup can be implemented
 
 #### **Response Times**
-- First TTS request: 10-15 seconds (model loading)
-- Subsequent requests: 3-8 seconds
+- First TTS request: 5-10 seconds (model loading)
+- Subsequent requests: 2-5 seconds
 - Text-only queries: 1-3 seconds
+- Model switching: 3-8 seconds
+
+#### **Model Selection for Performance**
+- **Fastest**: `tts_models/en/ljspeech/glow-tts`
+- **Best Quality**: `tts_models/en/vctk/vits`
+- **Balanced**: `tts_models/en/ljspeech/tacotron2-DDC` (default)
 
 ## 📁 Project Structure
 
 ```
 project/
-├── crag_api.py              # Main API server
-├── requirements.txt         # Python dependencies
+├── crag_api.py              # Main API server with Coqui TTS
+├── requirements.txt         # Python dependencies (updated for Coqui)
 ├── .env.template           # Environment template
 ├── audio_files/            # Generated TTS audio
 ├── frontend/               # Angular application
@@ -275,12 +303,18 @@ cd frontend
 ng serve --host 0.0.0.0 --port 4200
 ```
 
-### Adding New Features
+### Adding New TTS Models
 
-1. **New TTS Languages**: Extend TTSService with additional models
-2. **Custom Voices**: Modify speaker embedding generation
-3. **Additional RAG Sources**: Update URL management system
-4. **Enhanced UI**: Modify Angular components
+```python
+# Change model at runtime via API
+import requests
+
+response = requests.post("http://localhost:8000/set_tts_model", 
+                        json={"model_name": "tts_models/en/vctk/vits"})
+
+# Or modify default in TTSService class
+self.model_name = "tts_models/en/your_preferred_model"
+```
 
 ## 📊 Monitoring
 
@@ -289,8 +323,13 @@ ng serve --host 0.0.0.0 --port 4200
 curl http://localhost:8000/health
 ```
 
+### TTS Model Status
+```bash
+curl http://localhost:8000/tts_models
+```
+
 ### Logs
-- API startup logs show model loading status
+- API startup logs show TTS model loading status
 - TTS generation logs show audio file creation
 - Error logs provide debugging information
 
@@ -311,8 +350,9 @@ For issues and questions:
 1. Check troubleshooting section above
 2. Review API logs for error details
 3. Verify environment configuration
-4. Create issue with reproduction steps
+4. Test with different TTS models
+5. Create issue with reproduction steps
 
 ---
 
-**🎉 Enjoy your CRAG Assistant with TTS capabilities!**
+**🎉 Enjoy your CRAG Assistant with Coqui TTS capabilities!**
